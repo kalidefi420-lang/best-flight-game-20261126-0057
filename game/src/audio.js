@@ -1,110 +1,118 @@
-// Sound with no audio files: a WebAudio engine hum that follows the throttle, wind
-// that follows the airspeed, and short chimes for rings, landings and warnings.
-// Everything is built on the first user gesture; muted stays muted.
+// All sound is made, not loaded: a WebAudio engine hum whose pitch follows
+// the throttle, and short blips for rings, landings, warnings and crashes.
+// Nothing is fetched, nothing is stored; the first key press unlocks the
+// AudioContext, as browsers require.
 export function createAudio() {
   let ctx = null;
+  let master = null;
   let engineOsc = null;
-  let engineOsc2 = null;
   let engineGain = null;
-  let windGain = null;
-  let windSrc = null;
+  let engineFilter = null;
   let muted = false;
-  let started = false;
+  let unlocked = false;
 
   function ensure() {
-    if (started) return true;
+    if (ctx) return true;
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return false;
       ctx = new AC();
-      // Engine: two detuned saws through a lowpass, quiet at idle, loud at full chat.
+      master = ctx.createGain();
+      master.gain.value = 0.5;
+      master.connect(ctx.destination);
       engineOsc = ctx.createOscillator();
       engineOsc.type = 'sawtooth';
       engineOsc.frequency.value = 52;
-      engineOsc2 = ctx.createOscillator();
-      engineOsc2.type = 'sawtooth';
-      engineOsc2.frequency.value = 78;
-      const lp = ctx.createBiquadFilter();
-      lp.type = 'lowpass';
-      lp.frequency.value = 320;
+      engineFilter = ctx.createBiquadFilter();
+      engineFilter.type = 'lowpass';
+      engineFilter.frequency.value = 320;
       engineGain = ctx.createGain();
       engineGain.gain.value = 0;
-      engineOsc.connect(lp);
-      engineOsc2.connect(lp);
-      lp.connect(engineGain);
-      engineGain.connect(ctx.destination);
+      engineOsc.connect(engineFilter);
+      engineFilter.connect(engineGain);
+      engineGain.connect(master);
       engineOsc.start();
-      engineOsc2.start();
-      // Wind: looped filtered noise, louder the faster you fly.
-      const len = ctx.sampleRate * 2;
-      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-      const data = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
-      windSrc = ctx.createBufferSource();
-      windSrc.buffer = buf;
-      windSrc.loop = true;
-      const bp = ctx.createBiquadFilter();
-      bp.type = 'bandpass';
-      bp.frequency.value = 900;
-      bp.Q.value = 0.6;
-      windGain = ctx.createGain();
-      windGain.gain.value = 0;
-      windSrc.connect(bp);
-      bp.connect(windGain);
-      windGain.connect(ctx.destination);
-      windSrc.start();
-      started = true;
       return true;
     } catch {
       return false;
     }
   }
 
-  function blip(freq, when, dur, vol, type = 'sine') {
-    if (!ctx || muted) return;
-    try {
-      const o = ctx.createOscillator();
-      o.type = type;
-      o.frequency.value = freq;
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0, ctx.currentTime + when);
-      g.gain.linearRampToValueAtTime(vol, ctx.currentTime + when + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + when + dur);
-      o.connect(g);
-      g.connect(ctx.destination);
-      o.start(ctx.currentTime + when);
-      o.stop(ctx.currentTime + when + dur + 0.05);
-    } catch { /* sound is decoration; never break the game */ }
+  function unlock() {
+    if (unlocked) return;
+    if (!ensure()) return;
+    unlocked = true;
+    if (ctx.state === 'suspended') ctx.resume();
   }
 
-  return {
-    /** Call on the first gesture (start button / keypress) so audio may begin. */
-    unlock() {
-      if (ensure() && ctx.state === 'suspended') ctx.resume().catch(() => {});
-    },
-    /** Continuous levels, called every frame: throttle 0..1, speed knots. */
-    update(throttle, speedKts, onGround) {
-      if (!ctx || muted) return;
-      try {
-        const t = ctx.currentTime;
-        engineGain.gain.setTargetAtTime(onGround ? throttle * 0.05 : 0.02 + throttle * 0.075, t, 0.1);
-        engineOsc.frequency.setTargetAtTime(46 + throttle * 68, t, 0.1);
-        engineOsc2.frequency.setTargetAtTime(69 + throttle * 102, t, 0.1);
-        const wind = onGround ? 0 : Math.min(0.11, speedKts * 0.00045);
-        windGain.gain.setTargetAtTime(wind, t, 0.2);
-      } catch { /* ignore */ }
-    },
-    ring() { blip(880, 0, 0.18, 0.22); blip(1318, 0.07, 0.24, 0.2); },
-    land() { blip(392, 0, 0.3, 0.25); blip(523, 0.1, 0.4, 0.22); },
-    crash() { blip(110, 0, 0.5, 0.3, 'square'); blip(82, 0.12, 0.6, 0.25, 'square'); },
-    warn() { blip(660, 0, 0.12, 0.18, 'square'); blip(660, 0.16, 0.12, 0.18, 'square'); },
-    click() { blip(1200, 0, 0.06, 0.12); },
-    toggleMute() {
-      muted = !muted;
-      if (ctx && engineGain) engineGain.gain.value = 0;
-      if (ctx && windGain) windGain.gain.value = 0;
-      return muted;
-    },
-    get isMuted() { return muted; },
-  };
+  function tone(freq, dur, type, vol, when = 0) {
+    if (!ctx || muted) return;
+    const t0 = ctx.currentTime + when;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, t0);
+    gain.gain.linearRampToValueAtTime(vol, t0 + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    osc.connect(gain);
+    gain.connect(master);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.05);
+  }
+
+  function noiseBurst(dur, vol, cutoff) {
+    if (!ctx || muted) return;
+    const t0 = ctx.currentTime;
+    const len = Math.floor(ctx.sampleRate * dur);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = cutoff;
+    const gain = ctx.createGain();
+    gain.gain.value = vol;
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(master);
+    src.start(t0);
+  }
+
+  function update(throttle, speedKts, onGround) {
+    if (!ctx || !engineOsc) return;
+    const target = muted || onGround ? 0 : 0.045 + throttle * 0.075;
+    engineGain.gain.setTargetAtTime(target, ctx.currentTime, 0.12);
+    engineOsc.frequency.setTargetAtTime(46 + throttle * 62 + speedKts * 0.12, ctx.currentTime, 0.15);
+    engineFilter.frequency.setTargetAtTime(280 + throttle * 900, ctx.currentTime, 0.2);
+  }
+
+  function ring() {
+    tone(880, 0.16, 'sine', 0.22);
+    tone(1318, 0.24, 'sine', 0.18, 0.07);
+  }
+  function click() {
+    tone(660, 0.06, 'square', 0.08);
+  }
+  function land() {
+    noiseBurst(0.28, 0.3, 420);
+    tone(96, 0.3, 'sine', 0.3);
+  }
+  function crash() {
+    noiseBurst(0.7, 0.5, 900);
+    tone(58, 0.6, 'sawtooth', 0.22);
+  }
+  function warn() {
+    tone(520, 0.12, 'square', 0.1);
+    tone(520, 0.12, 'square', 0.1, 0.16);
+  }
+  function toggleMute() {
+    muted = !muted;
+    if (master) master.gain.value = muted ? 0 : 0.5;
+    return muted;
+  }
+
+  return { unlock, update, ring, click, land, crash, warn, toggleMute };
 }

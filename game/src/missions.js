@@ -1,12 +1,11 @@
-// The three sorties, each a different kind of flying: thread the rings down the
-// valley, put the wheels on runway 09, or drop a parcel on the island beacon.
-// A mission owns its start, its win condition, its score and its hint line.
+// The three sorties: what the pilot has to do, how it scores, and how a
+// landing is judged. Missions are pure state machines over the plane and
+// the world — no Three.js here, so the scoring can be read on its own.
 import {
-  DELIVERY_BASE_POINTS, LANDING_BASE_POINTS, MAX_LANDING_SPEED_KTS,
-  MAX_SINK_FPM, RING_FUEL_BONUS, RING_POINTS, TIME_BONUS_PER_SEC,
+  DROP_RING_RADIUS_M, DROP_SCORE, LANDING_BASE_SCORE, LANDING_CENTRELINE_BONUS,
+  LANDING_SINK_BONUS, LANDING_SPEED_BONUS, PAR_COURIER_S, PAR_LANDING_S,
+  PAR_RING_S, RING_COUNT, RING_RADIUS_M, RING_SCORE, TIME_BONUS_PER_S,
 } from './config.js';
-import { nextRing } from './world.js';
-import { placeInAir } from './plane.js';
 
 export const MISSION_RINGS = 'rings';
 export const MISSION_LANDING = 'landing';
@@ -17,142 +16,144 @@ export const MISSIONS = [
     id: MISSION_RINGS,
     name: 'Ring Run',
     blurb: 'Thread all 8 golden rings down the river valley. Fast and clean wins.',
-    parSeconds: 240,
+    par: PAR_RING_S,
   },
   {
     id: MISSION_LANDING,
     name: 'Runway Landing',
     blurb: 'Bring her home onto runway 09: on centreline, gear down, gentle as you like.',
-    parSeconds: 300,
+    par: PAR_LANDING_S,
   },
   {
     id: MISSION_COURIER,
     name: 'Island Courier',
     blurb: 'Carry the parcel east to the island beacon and drop it inside the yellow ring.',
-    parSeconds: 300,
+    par: PAR_COURIER_S,
   },
 ];
 
 export function missionById(id) {
-  return MISSIONS.find((m) => m.id === id) ?? MISSIONS[0];
+  return MISSIONS.find((m) => m.id === id) || MISSIONS[0];
 }
 
-/** Fresh mission state for a sortie. */
-export function createMissionState(missionId) {
+// Metres from the runway centreline: lateral offset while over the strip,
+// distance to the nearest threshold once past either end.
+export function centrelineDistance(world, plane) {
+  const r = world.runway;
+  const along = plane.x - r.x;
+  const lateral = Math.abs(plane.z - r.z);
+  if (Math.abs(along) <= r.length / 2) return lateral;
+  const endX = r.x + Math.sign(along) * (r.length / 2);
+  return Math.hypot(plane.x - endX, plane.z - r.z);
+}
+
+function startPosition(world, id) {
+  const r = world.runway;
+  if (id === MISSION_LANDING) {
+    // On final, six kilometres out, gear already down.
+    return { x: r.x - r.length / 2 - 5200, z: r.z, alt: 380, heading: 90, speed: 125 };
+  }
+  return { x: r.x - r.length / 2 - 260, z: r.z, alt: 130, heading: 90, speed: 112 };
+}
+
+export function startMission(world, planeApi, id) {
+  const spot = startPosition(world, id);
+  planeApi.reset(spot.x, spot.z, spot.alt, spot.heading, spot.speed);
+  if (id === MISSION_LANDING) planeApi.setGear(true);
   return {
-    id: missionId,
-    startedAt: 0,        // seconds of game time when the sortie began
-    ringsHit: 0,
-    score: 0,
-    status: 'flying',    // flying | landed | crashed | complete | dropped
-    detail: '',          // the one-line verdict shown at the end
-    dropX: null,         // where the parcel landed, once dropped
-    dropZ: null,
-    dropErrorM: null,
-    landing: null,       // { centrelineM, sinkFpm, speedKts, zone } once down
+    id, startedAt: 0, ringsHit: 0, score: 0,
+    status: 'flying', detail: '', nextRing: 0, dropped: false,
   };
 }
 
-/** Place the aircraft for the chosen mission and reset the world. */
-export function startMission(world, plane, missionId) {
-  world.reset();
-  const state = createMissionState(missionId);
-  if (missionId === MISSION_RINGS) {
-    placeInAir(plane, { x: -3400, z: world.riverZ(-3400), alt: 220, headingDeg: 90, speedKts: 170, throttle: 0.75 });
-  } else if (missionId === MISSION_LANDING) {
-    placeInAir(plane, { x: -5200, z: 0, alt: 750, headingDeg: 90, speedKts: 150, throttle: 0.45 });
-    plane.gearDown = true;
-  } else {
-    placeInAir(plane, { x: -3400, z: world.riverZ(-3400), alt: 420, headingDeg: 90, speedKts: 175, throttle: 0.7 });
-  }
-  plane.fuel = 100;
-  plane.integrity = 100;
-  return state;
-}
-
-/** Distance from the aircraft to the runway centreline, in metres. */
-export function centrelineDistance(world, plane) {
-  const { lateral } = world.runwayFrame(plane.x, plane.z);
-  return Math.abs(lateral);
-}
-
-/**
- * Called every step while flying: rings, the drop zone and the beacon.
- * Returns an event name ('ring' | 'dropped' | null) for sound and banners.
- */
-export function updateMission(world, plane, state, nowSec, dropParcel) {
+// Advance the mission one step. Returns 'ring' when a ring is flown,
+// 'dropped' when the parcel lands in the ring, otherwise null. Completing
+// a sortie sets status to 'complete' and banks the time bonus.
+export function updateMission(world, plane, state, time, dropping) {
+  const p = plane.plane;
+  if (state.status !== 'flying') return null;
   if (state.id === MISSION_RINGS) {
-    const ring = nextRing(world);
+    const ring = world.rings[state.nextRing];
     if (ring) {
-      const dx = plane.x - ring.x;
-      const dz = plane.z - ring.z;
-      const dy = plane.alt - ring.y;
-      // The course runs east, so a ring is flown when the aircraft is close
-      // along x and inside the ring's circle in the y-z plane.
-      if (Math.abs(dx) < 45 && Math.hypot(dz, dy) < ring.r) {
+      const d = Math.hypot(p.x - ring.x, p.alt - ring.y, p.z - ring.z);
+      if (d < RING_RADIUS_M + 8) {
         ring.hit = true;
         state.ringsHit += 1;
-        state.score += RING_POINTS;
-        plane.fuel = Math.min(100, plane.fuel + RING_FUEL_BONUS);
-        if (state.ringsHit >= world.rings.length) {
+        state.score += RING_SCORE;
+        state.nextRing += 1;
+        if (state.ringsHit >= RING_COUNT) {
           state.status = 'complete';
-          const elapsed = Math.max(1, nowSec - state.startedAt);
-          const bonus = Math.max(0, Math.round((missionById(state.id).parSeconds - elapsed) * TIME_BONUS_PER_SEC));
-          state.score += bonus;
-          state.detail = `All ${world.rings.length} rings, ${Math.round(elapsed)}s — time bonus +${bonus}.`;
+          state.detail = `All ${RING_COUNT} rings, ${formatTime(time - state.startedAt)}.`;
+          state.score += Math.max(0, Math.round((PAR_RING_S - (time - state.startedAt)) * TIME_BONUS_PER_S));
         }
         return 'ring';
       }
     }
+    return null;
   }
   if (state.id === MISSION_COURIER) {
-    const b = world.beacon;
-    const dist = Math.hypot(plane.x - b.x, plane.z - b.z);
-    if (dropParcel && state.status === 'flying' && plane.alt < 380) {
-      state.status = 'dropped';
-      state.dropX = plane.x;
-      state.dropZ = plane.z;
-      state.dropErrorM = Math.round(dist);
-      const quality = Math.max(0, 1 - dist / 300);
-      const points = Math.round(DELIVERY_BASE_POINTS * quality);
-      state.score += points;
-      state.detail = dist < 90
-        ? `Parcel dead on the beacon — ${state.dropErrorM} m out, +${points}.`
-        : `Parcel ${state.dropErrorM} m from the beacon, +${points}.`;
-      return 'dropped';
+    if (dropping && !state.dropped) {
+      const d = Math.hypot(p.x - world.beacon.x, p.z - world.beacon.z);
+      state.dropped = true;
+      if (d <= DROP_RING_RADIUS_M && !p.onGround) {
+        state.status = 'complete';
+        state.score += DROP_SCORE;
+        state.score += Math.max(0, Math.round((PAR_COURIER_S - (time - state.startedAt)) * TIME_BONUS_PER_S));
+        state.detail = 'Parcel down inside the ring. The island sends its thanks.';
+        return 'dropped';
+      }
+      state.detail = 'Parcel away — but it missed the ring.';
     }
+    return null;
   }
   return null;
 }
 
-/** Judge a touchdown on the runway and write the verdict into the mission state. */
-export function judgeLanding(world, plane, state, nowSec) {
-  const { along, lateral } = world.runwayFrame(plane.x, plane.z);
-  const onStrip = Math.abs(along) < 900 && Math.abs(lateral) < 23;
-  const sink = -plane.verticalSpeedFpm;
-  const soft = sink < MAX_SINK_FPM;
-  const slow = plane.speedKts < MAX_LANDING_SPEED_KTS;
-  const zone = along < -300 ? 'early' : along < 300 ? 'sweet spot' : 'deep';
-  state.landing = {
-    centrelineM: Math.round(Math.abs(lateral)),
-    sinkFpm: Math.round(sink),
-    speedKts: Math.round(plane.speedKts),
-    zone,
-  };
-  if (!onStrip) {
+// Called the moment the wheels touch. A runway touchdown with the gear
+// down is judged on centreline, sink rate and speed; anything else is a
+// crash, and the detail says why.
+export function judgeLanding(world, plane, state, time) {
+  const p = plane.plane;
+  const lateral = centrelineDistance(world, p);
+  const sinkFpm = -p.verticalSpeedFpm;
+  const elapsed = time - state.startedAt;
+  if (sinkFpm > 2200) {
     state.status = 'crashed';
-    state.detail = 'Off the strip — the valley floor is no runway.';
+    state.detail = `Too hard — ${Math.round(sinkFpm)} fpm down the hill. The airframe broke up.`;
     return;
   }
-  if (!soft || !slow) {
+  if (p.speedKts > 150) {
     state.status = 'crashed';
-    state.detail = `Too hard (${state.landing.sinkFpm} fpm) or too fast (${state.landing.speedKts} kt) — the gear gave up.`;
+    state.detail = `Too fast — ${Math.round(p.speedKts)} kt over the threshold. She ran off the end.`;
     return;
   }
   state.status = 'landed';
-  const centreScore = Math.max(0, 1 - Math.abs(lateral) / 23);
-  const sinkScore = Math.max(0, 1 - sink / MAX_SINK_FPM);
-  const points = Math.round(LANDING_BASE_POINTS * (0.4 + 0.35 * centreScore + 0.25 * sinkScore));
-  state.score += points;
-  state.detail = `Down in the ${zone}, ${state.landing.centrelineM} m off centreline, ${state.landing.sinkFpm} fpm — +${points}.`;
+  let score = LANDING_BASE_SCORE;
+  const notes = [];
+  if (lateral <= 6) {
+    score += LANDING_CENTRELINE_BONUS;
+    notes.push('dead on the centreline');
+  } else if (lateral <= 14) {
+    score += Math.round(LANDING_CENTRELINE_BONUS / 2);
+    notes.push('close to the centreline');
+  }
+  if (sinkFpm <= 420) {
+    score += LANDING_SINK_BONUS;
+    notes.push('a greaser');
+  } else if (sinkFpm <= 900) {
+    score += Math.round(LANDING_SINK_BONUS / 2);
+    notes.push('firm but fair');
+  }
+  if (p.speedKts >= 68 && p.speedKts <= 98) {
+    score += LANDING_SPEED_BONUS;
+    notes.push('right on speed');
+  }
+  score += Math.max(0, Math.round((PAR_LANDING_S - elapsed) * TIME_BONUS_PER_S));
+  state.score += score;
+  state.detail = `Wheels down on 09${notes.length ? ' — ' + notes.join(', ') : ''}.`;
+}
+
+export function formatTime(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }

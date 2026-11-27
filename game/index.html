@@ -3,12 +3,99 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sky Courier — Valley Run</title>
+<title>Sky Courier: Valley Run</title>
 <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-<canvas id="game" aria-label="Sky Courier: a flight game. Fly the plane with the arrow keys, work the throttle with Shift and Control, and complete the sortie."></canvas>
-<p id="status" role="status" aria-live="polite"></p>
+<canvas id="game"></canvas>
+<p id="status" aria-live="polite">Sky Courier. Pick a sortie.</p>
+
+<div id="hud" class="hidden">
+  <div id="top-left">
+    <div class="box" id="alt-box">ALT 0 FT</div>
+    <div class="box" id="spd-box">SPD 0 KT</div>
+    <div class="box" id="hdg-box">HDG 000°</div>
+  </div>
+  <div id="top-center">
+    <div id="mission-line">RING RUN</div>
+    <div id="time-line">0:00&nbsp;&nbsp;SCORE 0</div>
+  </div>
+  <div id="top-right">
+    <div class="box" id="score-box">SCORE 0</div>
+    <div class="box" id="best-box">BEST 0</div>
+    <div class="box" id="sound-box">SOUND — M</div>
+    <canvas id="minimap" width="168" height="126"></canvas>
+  </div>
+  <div id="banner" class="hidden"></div>
+  <div id="strip">
+    <div class="dial">
+      <canvas id="attitude" width="64" height="64"></canvas>
+      <span>ATTITUDE</span>
+    </div>
+    <div class="num"><span id="alt-num">0 FT</span><label>ALT</label></div>
+    <div class="num"><span id="spd-num">0 KT</span><label>SPD</label></div>
+    <div class="num"><span id="hdg-num">000°</span><label>HDG</label></div>
+    <div class="dial wide">
+      <canvas id="compass" width="220" height="40"></canvas>
+      <span>COMPASS</span>
+    </div>
+    <div class="bar">
+      <label>THR</label>
+      <div class="track"><div id="thr-bar"></div></div>
+    </div>
+    <div class="bar">
+      <label>FUEL</label>
+      <div class="track"><div id="fuel-bar"></div></div>
+      <span id="fuel-text">FUEL 100%</span>
+    </div>
+    <div class="lamps">
+      <span class="lamp" id="lamp-gear">GEAR</span>
+      <span class="lamp" id="lamp-flaps">FLAPS</span>
+      <span class="lamp" id="lamp-stall">STALL</span>
+      <span class="lamp" id="lamp-lowfuel">LOW FUEL</span>
+    </div>
+  </div>
+</div>
+
+<div id="title">
+  <h1>SKY COURIER</h1>
+  <p class="tag">VALLEY RUN &bull; three sorties, one valley, your call</p>
+  <div class="cards">
+    <button class="card" data-mission="rings">
+      <b>1 &mdash; RING RUN</b>
+      <span>Thread all 8 golden rings down the river valley. Fast and clean wins.</span>
+      <em>Par 4:00</em>
+    </button>
+    <button class="card" data-mission="landing">
+      <b>2 &mdash; RUNWAY LANDING</b>
+      <span>Bring her home onto runway 09: on centreline, gear down, gentle as you like.</span>
+      <em>Par 5:00</em>
+    </button>
+    <button class="card" data-mission="courier">
+      <b>3 &mdash; ISLAND COURIER</b>
+      <span>Carry the parcel east to the island beacon and drop it inside the yellow ring.</span>
+      <em>Par 5:00</em>
+    </button>
+  </div>
+  <p class="keys">Click a sortie, or press 1 / 2 / 3<br>
+    Fly: &uarr; &darr; pitch &nbsp;&bull;&nbsp; &larr; &rarr; bank and turn &nbsp;&bull;&nbsp; Shift / Ctrl throttle<br>
+    Space airbrake / drop &nbsp;&bull;&nbsp; G gear &nbsp;&bull;&nbsp; P pause &nbsp;&bull;&nbsp; M sound</p>
+  <p id="best-line">No sorties flown yet &mdash; be the first to bring her home.</p>
+</div>
+
+<div id="over" class="hidden">
+  <h2 id="over-title">SORTIE OVER</h2>
+  <p id="over-detail"></p>
+  <p id="over-score"></p>
+  <p id="over-sub"></p>
+</div>
+
+<div id="paused" class="hidden">
+  <h2>PAUSED</h2>
+  <p>Press P or Enter to keep flying.</p>
+</div>
+
+<script src="./vendor/three.min.js"></script>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
